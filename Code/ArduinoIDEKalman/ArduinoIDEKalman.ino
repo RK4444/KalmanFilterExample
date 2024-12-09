@@ -3,19 +3,36 @@
 const int I2C_adress_MPU = 0x68; // I2C address of MPU6050.
 const int I2C_address_QMC = 0x0D; // I2C address of QMC5883
 
-constexpr float dT = 1.0/75;
-constexpr float A[2][2] = {
-  {1, dT},
-  {0, 1}
-};
+constexpr float dT = 1.0/75;    //Step size for model in kalman filter
 
-constexpr float K[2][1]={
-  {0.1683},
-  {0.8053}
-};
+constexpr float K[2]={ 0.1683, 0.8053 };  //Kalman Gain
 
-volatile int16_t gyro_x;
-volatile int16_t mag_x, mag_y;
+// These are the offsets and gains from the magnetometer. This is needed to correct the hard-/softironing effects
+const static int magnetometerMeans[3] = {7392, 1246, -4250};
+const static float magnetometerGains[3] = {75.0, 371.0, 154.0};
+
+const float xyPlaneGain = 1.0*magnetometerGains[0]/magnetometerGains[1];  //factor for length compensation on the y axis inside the atan2()
+float angle = 0;  // measured angle
+float vangle = 0; // measured angular velocity
+const float pi = 3.14159;
+const static float conversionGainIMU = 2*pi/(131*360);  //conversion factor for conversion from LSB/(°/s) to rad/s
+
+// Variables from the kalman filter for the estimation and the correction part
+float phaseAngleEst = 0;
+float angularSpeedEst = 0;
+float phaseAngleCorr = 0;
+float angularSpeedCorr = 0;
+
+// Raw sensor data holders
+int16_t gyro_x;
+int16_t mag_x, mag_y, mag_z;
+
+// Interrupt pin and variables used in ISR
+const int dataReadyPin = 3;
+volatile bool newData = false;
+
+// variable for angular velocity calibration. It is assumed that the chip isn't moved while calibration
+long sum = 0;
 
 enum QMC5883_Registers {  //All registers, see datasheet
   Data_X_LSB = 0x00,
@@ -60,23 +77,17 @@ enum MPU6050_Registers {  //Most important registers, see register map
   WHO_AM_I = 0x75
 };
 
-const int dataReadyPin = 3;
-const int intPin = A7;
-volatile bool newData = false;
-//set up timer
-int timer1_cmp_match = 15624; // for 4Hz approximately on a prescaler of 256
-ISR(TIMER1_COMPA_vect);
+
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
-  Serial.println("Starting setup...");
+
   Wire.begin();
   Wire.beginTransmission(I2C_address_QMC);
-  Wire.write(Control_Register);
+  Wire.write(Control_Register);           // Put magnetometer in run mode
   Wire.write(0x01);
   Wire.endTransmission();
-  Serial.println("Finished setting up the QMC, setting up MPU...");
   Wire.beginTransmission(I2C_adress_MPU); 
   Wire.write(GYRO_CONFIG);
   Wire.write(0x00);                     // Gyroscope 250 deg/s mode
@@ -91,7 +102,7 @@ void setup() {
   Wire.endTransmission(true);
   delay(20);
   Wire.beginTransmission(I2C_adress_MPU); 
-  Wire.write(PWR_MGMNT_1);
+  Wire.write(PWR_MGMNT_1);              // Reset Chip
   Wire.write(0x00);
   Wire.endTransmission(true);
   Wire.beginTransmission(I2C_adress_MPU); 
@@ -104,67 +115,74 @@ void setup() {
   Wire.endTransmission(true);
   Wire.beginTransmission(I2C_adress_MPU); // enables hardware pin interrupt
   Wire.write(INT_PIN_CFG);
-  Wire.write(0x74);
+  Wire.write(0x14);
   Wire.endTransmission(true);
   Wire.beginTransmission(I2C_adress_MPU); 
   Wire.write(INT_ENABLE);
   Wire.write(0x01);                     // Enable interrupt for data ready pin
   Wire.endTransmission(true);
-  Serial.println("Finished setting up MPU");
 
   // set up interrupt
   pinMode(dataReadyPin, INPUT);
-  pinMode(intPin, INPUT);
   attachInterrupt(digitalPinToInterrupt(dataReadyPin), readData, RISING);
 
-  // noInterrupts();
-  //Set up Timer
-  // TCCR2B &= ~((1 << CS22) | (1 << CS21)); //sets bits 2 and 3 to zero, for the naming, see datasheet
-  // TCCR1A = 0;
-  // TCCR1B = 0;
-  // TCNT1 = timer1_cmp_match;
-  // TCCR1B |= (1 << CS12);      //set prescaler to 256 (see datasheet)
-  // TIMSK1 |= (1 << OCIE1A);    //enable timer interrupt for compare mode
-  // TCCR2B |= 0x01; //starts counter (sets bit 1 to 1)
-
-  // interrupts();
-  Serial.println("Finished general setup");
+  // perform calibration, offset error only
+  for(int i=0; i<300;++i) {
+    Wire.beginTransmission(I2C_adress_MPU);
+    Wire.write(GYRO_XOUT_H);
+    Wire.endTransmission(false);
+    Wire.requestFrom(I2C_adress_MPU, 2, true);
+    gyro_x = Wire.read()<<8 | Wire.read();
+    if (i > 90) {
+      sum += gyro_x;
+    }
+  }
+  sum/=210;
 }
 
+
 void loop() {
-  // put your main code here, to run repeatedly:
-  uint8_t status;
-  // Wire.beginTransmission(I2C_adress_MPU); 
-  // Wire.write(INT_STATUS); 
-  // Wire.endTransmission(false);
-  // Wire.requestFrom(I2C_adress_MPU, 1, true);
-  //   status = Wire.read();
-  Serial.print("x: ");Serial.println(analogRead(intPin));
+  //only calculate when new data is available
   if (newData) {
-    Serial.println("Got new Data");
+    // read in the values
+    Wire.beginTransmission(I2C_adress_MPU);
+    Wire.write(GYRO_XOUT_H);
+    Wire.endTransmission(false);
+    Wire.requestFrom(I2C_adress_MPU, 2, true);
+    gyro_x = Wire.read()<<8 | Wire.read();
+    Wire.beginTransmission(I2C_address_QMC);
+    Wire.write(Data_X_LSB);
+    Wire.endTransmission();
+    Wire.requestFrom(I2C_address_QMC, 6, true);
+    if(Wire.available() <= 6) { // strangely enough, all values need to be read in order to make the chip update the values, maybe a chip error
+      mag_x = Wire.read() | Wire.read()<<8;
+      mag_y = Wire.read() | Wire.read()<<8;
+      mag_z = Wire.read() | Wire.read()<<8;
+    }
+    
+    angle = atan2(xyPlaneGain*(mag_y-magnetometerMeans[1]), (mag_x-magnetometerMeans[0]));  // calculate angle on offset and gain corrected magnetometer data
+
+    vangle = conversionGainIMU*(gyro_x-sum);  // convert angular velocity to rad/s
+
+
+    // Kalman Filter
+    // estimation
+    phaseAngleEst = phaseAngleCorr + angularSpeedCorr*dT;
+    angularSpeedEst = angularSpeedCorr;
+
+    //correction
+    phaseAngleCorr = phaseAngleEst + K[1]*(angle-phaseAngleEst);
+    angularSpeedCorr = angularSpeedEst + K[1]*(vangle-angularSpeedEst);
+
+    // output data
+    Serial.print("vangle:");Serial.println(vangle);
+    Serial.print("vest:");Serial.println(angularSpeedCorr);
     newData = false;
   }
 }
 
+// isr for data reading
 void readData() {
-  Wire.beginTransmission(I2C_adress_MPU);
-  Wire.write(GYRO_XOUT_H);
-  Wire.endTransmission(false);
-    Wire.requestFrom(I2C_adress_MPU, 2, true);
-    gyro_x = Wire.read()<<8 | Wire.read();
 
-  Serial.println(gyro_x);
   newData = true;
-}
-
-ISR(TIMER1_COMPA_vect) {
-  Wire.beginTransmission(I2C_adress_MPU);
-  Wire.write(GYRO_XOUT_H);
-  Wire.endTransmission(false);
-    Wire.requestFrom(I2C_adress_MPU, 2, true);
-    gyro_x = Wire.read()<<8 | Wire.read();
-
-  Serial.println(gyro_x);
-  newData = true;
-  TCNT1 = timer1_cmp_match; //reload timer
 }
