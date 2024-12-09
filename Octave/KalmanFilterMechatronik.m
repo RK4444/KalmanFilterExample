@@ -1,13 +1,13 @@
 fsensor = 75;
 dT = 1/fsensor;
-magneticSensorVariance = 2.5e-5;
+magneticSensorVariance = 5e-4;  % The variance according to datasheet is actually 2.5e-5, but since it is known that the system will catch noise, a much higher value is needed
 imuSensorVariance = 2e-3;
 
 N=150;
 
 t = linspace(0, N*dT, N);
 testsig = pi - 2*pi*cos(pi*t/2);
-testsig2 = testsig + 0.25*randn(size(t)); % setting up the testsignal. Noise is added to the blank testsignal
+testsig2 = testsig + 0.5*randn(size(t)); % setting up the testsignal. Noise is added to the blank testsignal
 
 A=[1 dT;
     0 1]; % The matrices according to the formulas
