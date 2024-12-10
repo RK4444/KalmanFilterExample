@@ -1,13 +1,13 @@
 fsensor = 75;
 dT = 1/fsensor;
-magneticSensorVariance = 5e-4;  % The variance according to datasheet is actually 2.5e-5, but since it is known that the system will catch noise, a much higher value is needed
-imuSensorVariance = 2e-3;
+magneticSensorVariance = 1e-4;  % The variance according to datasheet is actually 2.5e-5, but since it is known that the system will catch noise, a much higher value is needed
+imuSensorVariance = 1e-3;
 
 N=150;
 
 t = linspace(0, N*dT, N);
 testsig = pi - 2*pi*cos(pi*t/2);
-testsig2 = testsig + 0.5*randn(size(t)); % setting up the testsignal. Noise is added to the blank testsignal
+testsig2 = testsig + 0.25*randn(size(t)); % setting up the testsignal. Noise is added to the blank testsignal
 
 A=[1 dT;
     0 1]; % The matrices according to the formulas
@@ -38,7 +38,7 @@ for i=1:1:N % recursively estimate the signals according to the formulas
 
   Kdiff = K - Kprev;
   KdiffRow(:,i) = Kdiff;
-  xkCorrected = xkEstimate + K*(testsig(i)-H*xkEstimate);
+  xkCorrected = xkEstimate + K*(testsig2(i)-H*xkEstimate);
   xfinal(i) = xkCorrected(1);
   xfinalspeed(i) = xkCorrected(2);
   PkCorrection = (eye(2)-K*H)*PkEstimate;
@@ -57,3 +57,5 @@ plot(t, KdiffRow); xlabel("t");ylabel("Absolute change");title("Difference of K_
 
 figure('Name', 'Estimated derivative');
 plot(t, xfinalspeed); xlabel("t");ylabel("Derivative");title("The estimated derivative of the testsignal");
+
+K

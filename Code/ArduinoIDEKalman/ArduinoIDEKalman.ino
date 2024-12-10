@@ -5,13 +5,17 @@ const int I2C_address_QMC = 0x0D; // I2C address of QMC5883
 
 constexpr float dT = 1.0/75;    //Step size for model in kalman filter
 
-constexpr float K[2]={ 0.1683, 0.8053 };  //Kalman Gain
+constexpr float K[2]= { 0.303, 1.9089 };  //Kalman Gain
+
+// Averager
+float x0, x1, x2, x3, angleoutx;
+float y0, y1, y2, y3, angleouty;
 
 // These are the offsets and gains from the magnetometer. This is needed to correct the hard-/softironing effects
 const static int magnetometerMeans[3] = {7392, 1246, -4250};
 const static float magnetometerGains[3] = {75.0, 371.0, 154.0};
 
-const float xyPlaneGain = 1.0*magnetometerGains[0]/magnetometerGains[1];  //factor for length compensation on the y axis inside the atan2()
+const float xyPlaneGain = 1.0*magnetometerGains[1]/magnetometerGains[0];  //factor for length compensation on the y axis inside the atan2()
 float angle = 0;  // measured angle
 float vangle = 0; // measured angular velocity
 const float pi = 3.14159;
@@ -86,7 +90,7 @@ void setup() {
   Wire.begin();
   Wire.beginTransmission(I2C_address_QMC);
   Wire.write(Control_Register);           // Put magnetometer in run mode
-  Wire.write(0x01);
+  Wire.write(0x09);
   Wire.endTransmission();
   Wire.beginTransmission(I2C_adress_MPU); 
   Wire.write(GYRO_CONFIG);
@@ -143,6 +147,8 @@ void setup() {
 
 void loop() {
   //only calculate when new data is available
+  
+
   if (newData) {
     // read in the values
     Wire.beginTransmission(I2C_adress_MPU);
@@ -159,9 +165,19 @@ void loop() {
       mag_y = Wire.read() | Wire.read()<<8;
       mag_z = Wire.read() | Wire.read()<<8;
     }
+    // Prefiltering the angles: This is needed because due to EMI the low noise floor from the datasheet is never reached, the noise is much higher and needs to be reduced
+    angleoutx = (x0 + x1 + x2 + x3)*0.25;
+    x3 = x2;
+    x2 = x1;
+    x1 = x0;
+    x0 = (mag_x-magnetometerMeans[0]);
+    angleouty = (y0 + y1 + y2 + y3)*0.25;
+    y3 = y2;
+    y2 = y1;
+    y1 = y0;
+    y0 = (mag_y-magnetometerMeans[1]);
+    angle = atan2(angleouty, xyPlaneGain*angleoutx) + pi;  // calculate angle on offset and gain corrected magnetometer data
     
-    angle = atan2(xyPlaneGain*(mag_y-magnetometerMeans[1]), (mag_x-magnetometerMeans[0]));  // calculate angle on offset and gain corrected magnetometer data
-
     vangle = conversionGainIMU*(gyro_x-sum);  // convert angular velocity to rad/s
 
 
@@ -171,12 +187,14 @@ void loop() {
     angularSpeedEst = angularSpeedCorr;
 
     //correction
-    phaseAngleCorr = phaseAngleEst + K[1]*(angle-phaseAngleEst);
-    angularSpeedCorr = angularSpeedEst + K[1]*(vangle-angularSpeedEst);
+    phaseAngleCorr = phaseAngleEst + K[0]*(angle-phaseAngleEst);
+    angularSpeedCorr = angularSpeedEst + K[1]*(angle-phaseAngleEst);
 
     // output data
     Serial.print("vangle:");Serial.println(vangle);
     Serial.print("vest:");Serial.println(angularSpeedCorr);
+    Serial.print("angleest:");Serial.println(phaseAngleCorr);
+    Serial.print("angle:");Serial.println(angle);
     newData = false;
   }
 }
